@@ -1,21 +1,20 @@
 import cv2
 import numpy as np
 from collections import OrderedDict
-# --- Tambahkan library Firebase ---
 import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import db
 
-# --- Inisialisasi Firebase SDK ---
-cred = credentials.Certificate('serviceAccountKey.json') # Pastikan nama file json sesuai
+# INISIALISASI FIREBASE
+cred = credentials.Certificate("../serviceAccountKey.json") 
 firebase_admin.initialize_app(cred, {
-    # PASTIKAN URL database_url ini sama persis dengan yang ada di config Firebase kamu
     'databaseURL': 'https://aiot-project-5d7f9-default-rtdb.asia-southeast1.firebasedatabase.app/' 
 })
 
-# Data masuk ke folder sensor
+# Data masuk ke path /sensor
 firebase_ref = db.reference('sensor')
 
+# CLASS CENTROID TRACKER
 class CentroidTracker:
     def __init__(self, max_disappeared=50):
         self.next_object_id = 0
@@ -79,6 +78,7 @@ class CentroidTracker:
 
         return self.objects
 
+# LOAD MODEL MOBILENET-SSD
 net = cv2.dnn.readNetFromCaffe('deploy.prototxt', 'mobilenet_iter_73000.caffemodel')
 
 CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
@@ -88,20 +88,23 @@ CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
 
 cap = cv2.VideoCapture(0)
 
-left_count = 0 #masuk
-right_count = 0 #keluar
-total_in_room = 0 #total orang
+# VARIABLE UTAMA
+left_count = 0        # Masuk
+right_count = 0       # Keluar
+jumlah_orang = 0      # jumlah orang
 
 ct = CentroidTracker()
 previous_x = {}
 line_x = None
 
-# Kirim data awal (0 orang) saat program pertama kali dijalankan
+# Kirim data awal (0 orang) saat program pertama kali booting
 try:
-    firebase_ref.update({'jumlah_orang': total_in_room})
+    firebase_ref.update({'jumlah_orang': jumlah_orang})
+    print("Inisialisasi awal Firebase sukses: 0 Orang.")
 except Exception as e:
     print("Gagal inisialisasi ke Firebase:", e)
 
+# LOOP UTAMA KAMERA
 while True:
     ret, frame = cap.read()
     if not ret:
@@ -110,7 +113,7 @@ while True:
     (h, w) = frame.shape[:2]
 
     if line_x is None:
-        line_x = w // 2  # garis vertikal tengah frame
+        line_x = w // 2  # Garis vertikal tengah frame
 
     blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)),
                                  0.007843, (300, 300), 127.5)
@@ -145,7 +148,7 @@ while True:
         if obj_id not in current_object_ids:
             del previous_x[obj_id]
 
-    # Variabel bendera (flag) untuk mengetahui apakah ada perubahan jumlah orang di loop ini
+    # Flag penanda perubahan data
     data_berubah = False
 
     for (object_id, centroid) in objects.items():
@@ -154,41 +157,38 @@ while True:
         if object_id in previous_x:
             prev_x = previous_x[object_id]
 
-            # Jika bergerak dari kanan ke kiri (Masuk)
+            # JALUR MASUK: Kanan ke Kiri
             if prev_x > line_x and current_x < line_x:
                 left_count += 1
-                total_in_room += 1  
-                data_berubah = True # Ada perubahan data
-                print(f"Person {object_id} moved LEFT (Entered). Total in room: {total_in_room}")
+                jumlah_orang += 1  # Variabel langsung ter-update otomatis
+                data_berubah = True 
+                print(f"[Kamera] Person {object_id} MASUK. Jumlah Orang Sekarang: {jumlah_orang}")
 
-            # Jika bergerak dari kiri ke kanan (Keluar)
+            # JALUR KELUAR: Kiri ke Kanan
             elif prev_x < line_x and current_x > line_x:
                 right_count += 1
-                total_in_room = max(0, total_in_room - 1)  
-                data_berubah = True # Ada perubahan data
-                print(f"Person {object_id} moved RIGHT (Exited). Total in room: {total_in_room}")
+                jumlah_orang = max(0, jumlah_orang - 1)  # Mencegah angka minus
+                data_berubah = True 
+                print(f"[Kamera] Person {object_id} KELUAR. Jumlah Orang Sekarang: {jumlah_orang}")
 
         previous_x[object_id] = current_x
 
-    # --- JIKA ADA PERUBAHAN, KIRIM KE FIREBASE ---
+    # SINKRONISASI INSTAN KE FIREBASE JIKA ADA PERUBAHAN
     if data_berubah:
         try:
-            # Menggunakan .update() agar data suhu/daya yang dikirim ESP32 tidak terhapus
-            firebase_ref.update({'jumlah_orang': total_in_room})
-            print(">>> Data jumlah orang berhasil diupdate ke Firebase!")
+            firebase_ref.update({'jumlah_orang': jumlah_orang})
+            print(f">>> [Firebase Cloud] Berhasil memperbarui jumlah_orang: {jumlah_orang}")
         except Exception as e:
-            print(">>> Gagal mengirim data ke Firebase:", e)
+            print(">>> [Firebase Cloud] Gagal mengirim data:", e)
 
-    # Gambar garis vertikal di tengah frame
+    # VISUALISASI LAYAR
     cv2.line(frame, (line_x, 0), (line_x, h), (0, 0, 255), 2)
 
-    # Tampilkan hasil counting di layar kamera
     cv2.putText(frame, f"LEFT (In): {left_count}", (10, 50),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
     cv2.putText(frame, f"RIGHT (Out): {right_count}", (10, 90),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-    
-    cv2.putText(frame, f"TOTAL IN ROOM: {total_in_room}", (10, 140),
+    cv2.putText(frame, f"TOTAL IN ROOM: {jumlah_orang}", (10, 140),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 3)
 
     cv2.imshow("People Counting - Vertical Line", frame)
