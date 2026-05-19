@@ -1,6 +1,20 @@
 import cv2
 import numpy as np
 from collections import OrderedDict
+# --- Tambahkan library Firebase ---
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import db
+
+# --- Inisialisasi Firebase SDK ---
+cred = credentials.Certificate('serviceAccountKey.json') # Pastikan nama file json sesuai
+firebase_admin.initialize_app(cred, {
+    # PASTIKAN URL database_url ini sama persis dengan yang ada di config Firebase kamu
+    'databaseURL': 'https://aiot-project-5d7f9-default-rtdb.asia-southeast1.firebasedatabase.app/' 
+})
+
+# Data masuk ke folder sensor
+firebase_ref = db.reference('sensor')
 
 class CentroidTracker:
     def __init__(self, max_disappeared=50):
@@ -29,7 +43,6 @@ class CentroidTracker:
         if len(self.objects) == 0:
             for centroid in input_centroids:
                 self.register(centroid)
-
         else:
             object_ids = list(self.objects.keys())
             object_centroids = list(self.objects.values())
@@ -66,7 +79,6 @@ class CentroidTracker:
 
         return self.objects
 
-
 net = cv2.dnn.readNetFromCaffe('deploy.prototxt', 'mobilenet_iter_73000.caffemodel')
 
 CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
@@ -74,15 +86,21 @@ CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
            "dog", "horse", "motorbike", "person", "pottedplant", "sheep",
            "sofa", "train", "tvmonitor"]
 
-cap = cv2.VideoCapture(1)
+cap = cv2.VideoCapture(0)
 
-left_count = 0
-right_count = 0
+left_count = 0 #masuk
+right_count = 0 #keluar
+total_in_room = 0 #total orang
 
 ct = CentroidTracker()
 previous_x = {}
-
 line_x = None
+
+# Kirim data awal (0 orang) saat program pertama kali dijalankan
+try:
+    firebase_ref.update({'jumlah_orang': total_in_room})
+except Exception as e:
+    print("Gagal inisialisasi ke Firebase:", e)
 
 while True:
     ret, frame = cap.read()
@@ -122,32 +140,56 @@ while True:
 
     objects = ct.update(centroids)
 
+    current_object_ids = list(objects.keys())
+    for obj_id in list(previous_x.keys()):
+        if obj_id not in current_object_ids:
+            del previous_x[obj_id]
+
+    # Variabel bendera (flag) untuk mengetahui apakah ada perubahan jumlah orang di loop ini
+    data_berubah = False
+
     for (object_id, centroid) in objects.items():
         current_x = centroid[0]
 
         if object_id in previous_x:
             prev_x = previous_x[object_id]
 
-            # Jika bergerak dari kanan ke kiri (melewati garis vertikal) -> count left (misal "masuk")
+            # Jika bergerak dari kanan ke kiri (Masuk)
             if prev_x > line_x and current_x < line_x:
                 left_count += 1
-                print(f"Person {object_id} moved LEFT.")
+                total_in_room += 1  
+                data_berubah = True # Ada perubahan data
+                print(f"Person {object_id} moved LEFT (Entered). Total in room: {total_in_room}")
 
-            # Jika bergerak dari kiri ke kanan -> count right (misal "keluar")
+            # Jika bergerak dari kiri ke kanan (Keluar)
             elif prev_x < line_x and current_x > line_x:
                 right_count += 1
-                print(f"Person {object_id} moved RIGHT.")
+                total_in_room = max(0, total_in_room - 1)  
+                data_berubah = True # Ada perubahan data
+                print(f"Person {object_id} moved RIGHT (Exited). Total in room: {total_in_room}")
 
         previous_x[object_id] = current_x
+
+    # --- JIKA ADA PERUBAHAN, KIRIM KE FIREBASE ---
+    if data_berubah:
+        try:
+            # Menggunakan .update() agar data suhu/daya yang dikirim ESP32 tidak terhapus
+            firebase_ref.update({'jumlah_orang': total_in_room})
+            print(">>> Data jumlah orang berhasil diupdate ke Firebase!")
+        except Exception as e:
+            print(">>> Gagal mengirim data ke Firebase:", e)
 
     # Gambar garis vertikal di tengah frame
     cv2.line(frame, (line_x, 0), (line_x, h), (0, 0, 255), 2)
 
-    # Tampilkan hasil counting
-    cv2.putText(frame, f"LEFT: {left_count}", (10, 50),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-    cv2.putText(frame, f"RIGHT: {right_count}", (10, 100),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+    # Tampilkan hasil counting di layar kamera
+    cv2.putText(frame, f"LEFT (In): {left_count}", (10, 50),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+    cv2.putText(frame, f"RIGHT (Out): {right_count}", (10, 90),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+    
+    cv2.putText(frame, f"TOTAL IN ROOM: {total_in_room}", (10, 140),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 3)
 
     cv2.imshow("People Counting - Vertical Line", frame)
 
